@@ -2,7 +2,9 @@ import argparse
 import os 
 import numpy as np
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForMaskedLM
+from transformers import IBERTModel, IBERTConfig
+
 from importlib.metadata import version
 
 from lib.prune import prune_wanda, prune_magnitude, prune_sparsegpt, prune_ablate, check_sparsity, find_layers
@@ -22,6 +24,21 @@ def get_llm(model_name, cache_dir="llm_weights"):
         device_map="auto"
     )
 
+    model.seqlen = model.config.max_position_embeddings 
+    return model
+
+def get_llm(model_name, cache_dir="llm_weights"):
+    if "ibert" in model_name.lower():
+        config = IBERTConfig.from_pretrained("kssteven/ibert-roberta-base")
+        model = AutoModelForMaskedLM.from_pretrained("kssteven/ibert-roberta-base", config=config)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, 
+            torch_dtype=torch.float16, 
+            cache_dir=cache_dir, 
+            low_cpu_mem_usage=True, 
+            device_map="auto"
+        )
     model.seqlen = model.config.max_position_embeddings 
     return model
 
@@ -56,7 +73,11 @@ def main():
     print(f"loading llm model {args.model}")
     model = get_llm(args.model, args.cache_dir)
     model.eval()
-    tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
+
+    if "ibert" in args.model.lower():
+        tokenizer = AutoTokenizer.from_pretrained("kssteven/ibert-roberta-base")
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=False)
 
     device = torch.device("cuda:0")
     if "30b" in args.model or "65b" in args.model: # for 30b and 65b we use device_map to load onto multiple A6000 GPUs, thus the processing here.
