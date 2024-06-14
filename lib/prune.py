@@ -58,10 +58,14 @@ def check_sparsity(model):
 def prepare_calibration_input(model, dataloader, device):
     use_cache = model.config.use_cache
     model.config.use_cache = False
-    layers = model.model.layers
+    #layers = model.model.layers
+    layers = model.encoder.layer if hasattr(model, 'encoder') else model.model.layers
+
 
     # dev = model.hf_device_map["model.embed_tokens"]
-    if "model.embed_tokens" in model.hf_device_map:
+    if "bert.embeddings" in model.hf_device_map:
+        device = model.hf_device_map["bert.embeddings"]
+    elif "model.embed_tokens" in model.hf_device_map:
         device = model.hf_device_map["model.embed_tokens"]
 
     dtype = next(iter(model.parameters())).dtype
@@ -82,7 +86,10 @@ def prepare_calibration_input(model, dataloader, device):
     layers[0] = Catcher(layers[0])
     for batch in dataloader:
         try:
-            model(batch[0].to(device))
+            if "bert" in model.config.model_type:
+                model(input_ids=batch[0].to(device), attention_mask=batch[1].to(device), token_type_ids=batch[2].to(device))
+            else:
+                model(batch[0].to(device))
         except ValueError:
             pass 
     layers[0] = layers[0].module
@@ -103,14 +110,16 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
     return W_mask, cur_sparsity
 
 def prune_magnitude(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0, prune_m=0):
-    layers = model.model.layers 
+    #layers = model.model.layers 
+    layers = model.encoder.layer if hasattr(model, 'encoder') else model.model.layers
 
     for i in range(len(layers)):
         layer = layers[i]
         subset = find_layers(layer)
 
         for name in subset:
-            W = subset[name].weight.data 
+            W = subset[name].weight().int_repr() if hasattr(subset[name].weight(), 'int_repr') else subset[name].weight().data
+            #W = subset[name].weight.data 
             W_metric = torch.abs(W)
             if prune_n != 0:
                 W_mask = (torch.zeros_like(W)==1)
@@ -129,7 +138,17 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     model.config.use_cache = False 
 
     print("loading calibdation data")
-    dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
+
+    if hasattr(model.config, 'max_position_embeddings'):
+        seqlen = model.config.max_position_embeddings
+    else:
+        seqlen = model.seqlen
+    
+    # Create the dataloader with the appropriate sequence length
+    dataloader, _ = get_loaders("c4", nsamples=args.nsamples, seed=args.seed, seqlen=seqlen, tokenizer=tokenizer)
+   
+
+    #dataloader, _ = get_loaders("c4",nsamples=args.nsamples,seed=args.seed,seqlen=model.seqlen,tokenizer=tokenizer)
     print("dataset loading complete")
     with torch.no_grad():
         inps, outs, attention_mask, position_ids = prepare_calibration_input(model, dataloader, device)
@@ -138,10 +157,12 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
     for i in range(len(layers)):
         layer = layers[i]
         subset = find_layers(layer)
-
-        if f"model.layers.{i}" in model.hf_device_map:   ## handle the case for llama-30B and llama-65B, when the device map has multiple GPUs;
+        
+        if f"encoder.layer.{i}" in model.hf_device_map:   ## handle the case for large models with multiple GPUs;
+            dev = model.hf_device_map[f"encoder.layer.{i}"]
+        elif f"model.layers.{i}" in model.hf_device_map:   ## handle the case for llama-30B and llama-65B, when the device map has multiple GPUs;
             dev = model.hf_device_map[f"model.layers.{i}"]
-            inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
+        inps, outs, attention_mask, position_ids = inps.to(dev), outs.to(dev), attention_mask.to(dev), position_ids.to(dev)
 
         wrapped_layers = {}
         for name in subset:
@@ -163,7 +184,12 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
 
         for name in subset:
             print(f"pruning layer {i} name {name}")
+            
+        if "bert" in model.config.model_type:
+            W_metric = torch.abs(subset[name].weight().int_repr()) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1, -1)))
+        else:
             W_metric = torch.abs(subset[name].weight.data) * torch.sqrt(wrapped_layers[name].scaler_row.reshape((1,-1)))
+            
 
             W_mask = (torch.zeros_like(W_metric) == 1)  ## initialize a mask to be all False
             if prune_n != 0:
@@ -199,7 +225,10 @@ def prune_wanda(args, model, tokenizer, device=torch.device("cuda:0"), prune_n=0
                     indices = sort_res[1][:,:int(W_metric.shape[1]*args.sparsity_ratio)]
                     W_mask.scatter_(1, indices, True)
 
-            subset[name].weight.data[W_mask] = 0  ## set weights to zero 
+            if "bert" in model.config.model_type:
+                subset[name].weight().int_repr()[W_mask] = 0  ## set weights to zero 
+            else:
+                subset[name].weight.data[W_mask] = 0  ## set weights to zero 
 
         for j in range(args.nsamples):
             with torch.no_grad():
