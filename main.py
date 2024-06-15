@@ -3,7 +3,6 @@ import os
 import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForMaskedLM
-from transformers import IBERTModel, IBERTConfig
 
 from importlib.metadata import version
 
@@ -29,7 +28,7 @@ def get_llm(model_name, cache_dir="llm_weights"):
 
 def get_llm(model_name, cache_dir="llm_weights"):
     if "ibert" in model_name.lower():
-        config = IBERTConfig.from_pretrained("kssteven/ibert-roberta-base")
+        config = AutoTokenizer.from_pretrained("kssteven/ibert-roberta-base")
         model = AutoModelForMaskedLM.from_pretrained("kssteven/ibert-roberta-base", config=config)
     else:
         model = AutoModelForCausalLM.from_pretrained(
